@@ -10,8 +10,8 @@ PREREQUISITES
    (http://search.cpan.org/~dlux/Parallel-ForkManager-0.7.9/lib/Parallel/ForkManager.pm)
 3. R for ploting                 
    (http://www.r-project.org/)
-(Optional)                              
-4. Jellyfish for kmer counting   
+                             
+4. Jellyfish for kmer counting   (Optional) 
    (http://www.cbcb.umd.edu/software/jellyfish/) 
 
 -----------

@@ -19,9 +19,11 @@ BASIC USAGE
 -----------
 
 * Trimming by quality 5 and filtering reads with any ambiguous base or low complexity.
+
   $ perl illumina_fastq_QC.pl -p 'reads1.fastq reads2.fastq' -d out_directory
 
 * Quailty check only on subsamples of input, no trimming and filtering. 
+
   $ perl illumina_fastq_QC.pl -p 'reads1.fastq reads2.fastq' -d out_directory -qc_only 
 
 ---------------

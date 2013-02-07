@@ -53,7 +53,7 @@ If your local Galaxy is not hook up with clusters, then ignore this step.
 Edit universe_wsgi.ini based on the instruction from 
 http://wiki.galaxyproject.org/Admin/Config/Performance/Cluster#Cluster_Resources_Managers
 
-Edit line 40 of the file
+Edit line 44 of the file
 $ ${galaxy_dir}/tools/IFQC/IFQC.xml
 
 indicating for -t the number of process which should be consistent with the Job runner

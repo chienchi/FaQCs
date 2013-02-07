@@ -8,10 +8,11 @@ PREREQUISITES
 1. The main program is developed in Perl v 5.8.8.
 2. Parallel::ForkManager module from CPAN   
    (http://search.cpan.org/~dlux/Parallel-ForkManager-0.7.9/lib/Parallel/ForkManager.pm)
-3. R for ploting                 
-   (http://www.r-project.org/)
-                             
-4. Jellyfish for kmer counting   (Optional) 
+3. String::Approx module from CPAN   
+   (http://search.cpan.org/~jhi/String-Approx-3.27/Approx.pm)
+4. R for ploting                 
+   (http://www.r-project.org/)                             
+5. Jellyfish for kmer counting   (Optional) 
    (http://www.cbcb.umd.edu/software/jellyfish/) 
 
 -----------
@@ -29,6 +30,9 @@ BASIC USAGE
 ---------------
 VERSION HISTORY
 ---------------
+======== Version 1.2
+- add -adapter and -artifactFile for filtering reads with Adapters/Primers and other contaminations
+- require String::Approx module from CPAN for above function
 
 ======== Version 1.1
 New features and changes in illumina_fastq_qc  version 1.1 with respect to version 1.0:

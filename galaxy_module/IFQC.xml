@@ -35,6 +35,10 @@ illumina_fastq_QC.pl
 -discard
 -Rd $discard
 #end if
+#if $condition4.select=="yes"
+-adapter
+-artifactFile $adapters
+#end if
 -d $__new_file_path__
 ## number of process
 -t 2
@@ -85,6 +89,16 @@ illumina_fastq_QC.pl
     <param name="min_length" type="integer" value="50" label="minimum length threshold after trimming"/>   
     <param name="N_num" type="integer" value="0" label="The ambiguous base 'N' tolerance number" min="0" />   
     <param name="lc" type="float" value="0.85" label="Maximum fraction of mono-/di-nucleotide sequence" min="0.0" max="1.0"/>   
+    <conditional name="condition4">
+      <param name="select" type="select" label="Filter Reads with Adapters/Primers">
+             <option value="no" selected="true">No</option>
+             <option value="yes">Yes</option>
+      </param>
+      <when value="no"/>
+      <when value="yes">
+          <param name="adapters" type="data" format="fasta" label="fasta file"/>
+      </when>
+    </conditional>
     <conditional name="condition3">
       <param name="select" type="select" label="Output discarded reads">
              <option value="no" selected="true">No</option>
@@ -179,7 +193,8 @@ If you find IlluminaFastqQC useful in your research, please cite our paper:
 
 Your are wellcome to include this module in your local Galaxy installation. You can find the source file for the module and the instructions to integrate it in the "galaxy_module" folder at
 
-http://github.com/chienchi/IFQC
+https://github.com/chienchi/IFQC
+
 
   </help>
 </tool>

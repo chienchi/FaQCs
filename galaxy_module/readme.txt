@@ -22,6 +22,7 @@ http://cran.cnr.berkeley.edu/
 Install the last version of Perl Parallel::ForkManager module 
 $ perl -MCPAN -e shell
 $ cpan> install Parallel::ForkManager
+$ cpan> install String::Approx
 
 3) -------
 

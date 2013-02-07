@@ -131,7 +131,7 @@ my $outDir;
 my $output_discard;
 my $qc_only;
 my $stringent_cutoff=0;
-my $filter_adapter;
+my $filter_adapter=0;
 my $filterAdapterMismatchRate=0.2;
 my $artifactFile;
 my $subsample_num=10;

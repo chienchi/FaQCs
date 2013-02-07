@@ -1,4 +1,4 @@
-<tool id="IFQC" name="Illumina Fastq QC" version="1.1.0">
+<tool id="IFQC" name="Illumina Fastq QC" version="1.2.0">
   <description>Trim and QC fastq files</description>
   <requirements>
         <requirement type="binary">R</requirement>

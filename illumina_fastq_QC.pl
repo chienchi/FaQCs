@@ -27,13 +27,13 @@
 #              6. multi-threads  (required Parallel::ForkManager)         #
 #              7. output ascii conversion 8. stats report                 #
 #              9. input paired end reads 10. average read quality filter  #
-#       11. Filter artifact                                               #
+#             11. Trim artifact 12. replace N                             #
 # AUTHOR: CHIEN-CHI LO                                                    #                                                
-# Copyright (c) 2012 LANS, LLC All rights reserved                        #
+# Copyright (c) 2013 LANS, LLC All rights reserved                        #
 # All right reserved. This program is free software; you can redistribute #
 # it and/or modify it under the same terms as Perl itself.                #
 #                                                                         #
-# LAST REVISED: September 2012                                            #
+# LAST REVISED: July 2013                                                 #
 ###########################################################################
 use strict;
 use File::Basename;
@@ -41,7 +41,7 @@ use Getopt::Long;
 use Parallel::ForkManager;
 use String::Approx;
 
-my $version=1.2;
+my $version=1.3;
 my $debug=0;
 
 sub Usage {
@@ -49,45 +49,50 @@ print <<"END";
      Usage: perl $0 [options] [-u unpaired.fastq] -p 'reads1.fastq reads2.fastq' -d out_directory
      Version $version
      Input File: (can use more than once)
-            -u            Unpaired reads
+            -u            <File> Unpaired reads
             
-            -p            Paired reads in two files and separate by space in quote
+            -p            <Files> Paired reads in two files and separate by space in quote
      Trim:
-            -q            Targets # as quality level (default 5) for trimming
-                          NOT A HARD cutoff! (see bwa's bwa_trim_read() function in bwaseqio.c)
-     Filters:
-            -min_L        Trimmed sequence length will have at least minimum length (default:50)
+            -mode         "HARD" or "BWA" (default BWA)
+                          BWA trim is NOT A HARD cutoff! (see bwa's bwa_trim_read() function in bwaseqio.c)
 
-            -avg_q        Average quality cutoff (default:0, no filtering)
-            
-            -n            <INT> Filter Sequence has more than this number of base "N" will be discarded. 
-                          (default: 0, zero tolerance)
+            -q            <INT> Targets # as quality level (default 5) for trimming
 
-            -lc           Low complexity filter ratio, Maximum fraction of mono-/di-nucleotide sequence  (default: 0.85)
-            
             -adapter      <bool> Filter reads with illumina adapter/primers (default: no)
-                          -rate   Mismatch ratio of adapters' length (default: 0.2, allow 20% mismatches)
+                          -rate   <FLOAT> Mismatch ratio of adapters' length (default: 0.2, allow 20% mismatches)
             					
-            -artifactFile  <file>    additional artifact (adapters/primers/contaminations) reference file in fasta format 
+            -artifactFile  <File>    additional artifact (adapters/primers/contaminations) reference file in fasta format 
+     Filters:
+            -min_L        <INT> Trimmed read should have to be at least this minimum length (default:50)
+
+            -avg_q        <NUM> Average quality cutoff (default:0, no filtering)
+            
+            -n            <INT> Trimmed read has more than this number of continuous base "N" will be discarded. 
+                          (default: 2, "NN") 
+
+            -lc           <FLOAT> Low complexity filter ratio, Maximum fraction of mono-/di-nucleotide sequence  (default: 0.85)
+
+            -phiX         <bool> Filter phiX reads 
+            
      Q_Format:
             -ascii        Encoding type: 33 or 64 or autoCheck (default)
                           Type of ASCII encoding: 33 (standard) or 64 (illumina 1.3+)
 
             -out_ascii    Output encoding. (default: 33)
      Output:
-            -prefix       Output file prefix. (default: QC)
+            -prefix       <TEXT> Output file prefix. (default: QC)
 
-            -stats        Statistical numbers output file (default: prefix.stats.txt)
+            -stats        <File> Statistical numbers output file (default: prefix.stats.txt)
 
-            -d            Output directory.
+            -d            <PATH> Output directory.
      Options:
-            -t            # of CPUs to run the script (default:2 )
+            -t            <INT > # of CPUs to run the script (default:2 )
 
-            -split_size   Split the input file into several sub files by sequence number (default: 1000000) 
+            -split_size   <INT> Split the input file into several sub files by sequence number (default: 1000000) 
 
-            -qc_only      <bool> no Filters (-q 0 -avg_q 0 -n 1000 -lc 1 -min_L 0)
+            -qc_only      <bool> no Filters, no Trimming, report numbers.
 
-            -kmer_rarefaction_on     <bool>   
+            -kmer_rarefaction     <bool>   
                           Turn on the kmer calculation. Turn on will slow down ~10 times. (default:Calculation is off.)
                           (meaningless if -subset is too small)
                           -m  <INT>     kmer for rarefaction curve (range:[2,31], default 31)
@@ -96,8 +101,10 @@ print <<"END";
                                   (default: 10,  10x1000000 SE reads, 20x1000000 PE reads)
 
             -discard      <bool> Output discarded reads to prefix.discard.fastq (default: 0, not output)
+ 
+            -substitute   <bool> Replace "N" in the trimmed reads with random base A,T,C ,or G (default: 0, off)
 
-            -debug        keep intermediate files
+            -debug        <bool> keep intermediate files
 END
 exit;
 }
@@ -111,7 +118,9 @@ my $opt_q=5;
 my $opt_min_L=50;
 my $opt_avg_cutoff=0;
 my $ascii;
-my $N_num_cutoff=0;
+my $mode="BWA";
+my $N_num_cutoff=2;
+my $replace_N;
 my $out_offset=33;
 my $low_complexity_cutoff_ratio=0.85;
 my $subfile_size=1000000;
@@ -129,17 +138,27 @@ my @paired_files;
 my @unpaired_files;
 my $outDir;
 my $output_discard;
-my $qc_only;
+my $qc_only=0;
 my $stringent_cutoff=0;
 my $filter_adapter=0;
+my $filter_phiX=0;
 my $filterAdapterMismatchRate=0.2;
 my $artifactFile;
 my $subsample_num=10;
+
+## not used yet for shihai's algorithm
+my $minicut=4;
+my $lowperc=0;
+my $upperc=0.2;
+my $discperc=0.35;
+my $cutlimit1=0.3;
+my $cutlimit2=0.3;
 
 # Options
 GetOptions("q=i"          => \$opt_q,
            "min_L=i"      => \$opt_min_L,
            "avg_q=f"      => \$opt_avg_cutoff,
+           "mode=s"       => \$mode,
            "p=s"          => \@paired_files,
            "u=s"          => \@unpaired_files,
            "ascii=i"      => \$ascii,
@@ -148,17 +167,19 @@ GetOptions("q=i"          => \$opt_q,
            "lc=f"         => \$low_complexity_cutoff_ratio,
            "out_ascii=i"  => \$out_offset,
            "t|threads=i"  => \$thread,
-           'kmer_rarefaction_on' => \$kmer_rarefaction_on,
+           'kmer_rarefaction' => \$kmer_rarefaction_on,
            'm=i'          => \$kmer,
            'split_size=i' => \$subfile_size,
            'prefix=s'     => \$prefix,
            'd=s'          => \$outDir,
            'stats=s'      => \$stats_output,
            'discard'      => \$output_discard,
+           'substitute'   => \$replace_N,
            'qc_only'      => \$qc_only,
            'subset=i'     => \$subsample_num,
            'debug'        => \$debug,
            'adapter'      => \$filter_adapter,
+           'phiX'         => \$filter_phiX,
            'rate=f'       => \$filterAdapterMismatchRate,
            'artifactFile=s'  => \$artifactFile,
            'R1=s'         => \$trimmed_reads1_fastq_file,   # for galaxy impelementation
@@ -170,6 +191,15 @@ GetOptions("q=i"          => \$opt_q,
 
 die "Missing input files.\n", &Usage() unless @unpaired_files or @paired_files;
 die "Missing output directory.\n",&Usage() unless $outDir;
+if ($mode =~ /hard/i)
+{
+    print "Hard trimming is used. \n" if (!$qc_only);
+}
+else
+{
+    print "Bwa trimming algorithm is used. \n" if (!$qc_only);
+    $mode="BWA";
+}
 
 ###### Output file initialization #####
 # temp files for plotting
@@ -230,25 +260,39 @@ system ("rm $kmer_files") if (-e $kmer_files);
 if ($qc_only)
 {
     # set all Filters to pass
-    $opt_q=0;
-    $opt_min_L=0;
-    $opt_avg_cutoff=0;
-    $N_num_cutoff=1000;
-    $low_complexity_cutoff_ratio=1;
+   # $opt_q=0;
+   # $opt_min_L=0;
+   # $opt_avg_cutoff=0;
+    #$N_num_cutoff=1000;
+    #$low_complexity_cutoff_ratio=1;
 }
 
 
-my ( $total_count,$total_count_1, $total_count_2, $total_num, $trimmed_num,$total_raw_seq_len, $total_trimmed_seq_len);
-my ( $trim_seq_len_std, $trim_seq_len_avg, $max, $min, $median, $numOfReadsWithAdapter);
+my ( $total_count,$total_count_1, $total_count_2, $total_len_1,$total_len_2, $total_len);
+my ( $total_num, $trimmed_num,$total_raw_seq_len, $total_trimmed_seq_len);
+my ( $trim_seq_len_std, $trim_seq_len_avg, $max, $min, $median);
 my ( $paired_seq_num, $total_paired_bases );
 my ( @split_files, @split_files_2);
+my ( $readsFilterByLen, $basesFilterByLen ) = (0,0);
+my ( $readsTrimByQual, $basesTrimByQual ) = (0,0);
+my ( $readsFilterByNN, $basesFilterByNN ) = (0,0);
+my ( $readsFilterByPhiX, $basesFilterByPhiX ) = (0,0);
+my ( $readsTrimByAdapter, $basesTrimByAdapter ) = (0,0);
+my ( $readsFilterByAvgQ, $basesFilterByAvgQ ) = (0,0);
+my ( $readsFilterByLowComplexity, $basesFilterByLowComplexity ) = (0,0);
+$N_num_cutoff=1 if (!$N_num_cutoff);
 my %position;
 my %AverageQ;
 my %base_position;
 my %base_content;
 my %len_hash;
+my %filter_stats;
+my %EachAdapter;
+my %EachReplaceN;
 my ( $i_file_name, $i_path, $i_suffix );
   
+my ($phiX_id,$phiX_seq) = &read_phiX174 if ($filter_phiX);
+
   foreach my $input (@unpaired_files,@paired_files){
      print "Processing $input file\n";
      #print $STATS_fh "Processing $input file\n";
@@ -262,9 +306,10 @@ my ( $i_file_name, $i_path, $i_suffix );
      if (! $ascii){$ascii = &checkQualityFormat($reads1_file)}
 
     #split
-    ($total_count_1,@split_files) = &split_fastq($reads1_file,$outDir,$subfile_size);
-    ($total_count_2,@split_files_2) = &split_fastq($reads2_file,$outDir,$subfile_size) if ($reads2_file);
+    ($total_count_1,$total_len_1,@split_files) = &split_fastq($reads1_file,$outDir,$subfile_size);
+    ($total_count_2,$total_len_2,@split_files_2) = &split_fastq($reads2_file,$outDir,$subfile_size) if ($reads2_file);
      $total_count += $total_count_1 + $total_count_2;
+     $total_len += $total_len_1 + $total_len_2;
      my $random_num_ref = &random_subsample(scalar(@split_files),$subsample_num);
      $subsample_num -= scalar(@split_files);
      $subsample_num -= scalar(@split_files) if ($reads2_file);
@@ -296,7 +341,31 @@ my ( $i_file_name, $i_path, $i_suffix );
           $median = $nums_ref->{median};
           $paired_seq_num += $nums_ref->{paired_seq_num};
           $total_paired_bases +=  $nums_ref->{total_paired_bases};
-          $numOfReadsWithAdapter += $nums_ref->{numOfReadsWithAdapter};
+          my %filter;
+          if ($nums_ref->{filter})
+          {
+            %filter=%{$nums_ref->{filter}};
+            map {$filter_stats{$_}->{basesNum} += $filter{$_}->{basesNum};
+                 $filter_stats{$_}->{readsNum} += $filter{$_}->{readsNum}; 
+              } keys %filter; 
+          }
+          if ($replace_N)
+          {
+              my %tmp_ReplaceN;
+              %tmp_ReplaceN  = %{$nums_ref->{replaceN}} if ($nums_ref->{replaceN});
+              map {
+                    $EachReplaceN{$_} += $tmp_ReplaceN{$_};
+                  } keys %tmp_ReplaceN;
+          }
+          if ($filter_adapter)
+          {
+              my %tmp_Adapters;
+              %tmp_Adapters= %{$nums_ref->{adapter}} if ($nums_ref->{adapter});
+              map {
+                    $EachAdapter{$_}->{readsNum} += $tmp_Adapters{$_}->{readsNum};
+                    $EachAdapter{$_}->{basesNum} += $tmp_Adapters{$_}->{basesNum};
+                  } keys %tmp_Adapters;
+          }
           my %temp_avgQ = %{$nums_ref->{ReadAvgQ}};
           map {$AverageQ{$_}->{bases} += $temp_avgQ{$_}->{basesNum};
                $AverageQ{$_}->{reads} += $temp_avgQ{$_}->{readsNum}; 
@@ -329,9 +398,18 @@ my ( $i_file_name, $i_path, $i_suffix );
           }
           if ( $random_num_ref->{$ident}){
               open (KMEROUT, ">>$kmer_files") or die "$!\n";
-              print KMEROUT $nums_ref->{trim_file_name_1},"\t",$nums_ref->{trim_seq_num_1},"\n";
-              print KMEROUT $nums_ref->{trim_file_name_2},"\t" if ($nums_ref->{trim_file_name_2});
-              print KMEROUT $nums_ref->{trim_seq_num_2},"\n" if ($nums_ref->{trim_file_name_2});
+              if ($qc_only)
+              {
+                  print KMEROUT $nums_ref->{file_name_1},"\t",$nums_ref->{raw_seq_num_1},"\n";
+                  print KMEROUT $nums_ref->{file_name_2},"\t" if ($nums_ref->{file_name_2});
+                  print KMEROUT $nums_ref->{raw_seq_num_2},"\n" if ($nums_ref->{file_name_2});
+              }
+              else
+              {
+                  print KMEROUT $nums_ref->{trim_file_name_1},"\t",$nums_ref->{trim_seq_num_1},"\n";
+                  print KMEROUT $nums_ref->{trim_file_name_2},"\t" if ($nums_ref->{trim_file_name_2});
+                  print KMEROUT $nums_ref->{trim_seq_num_2},"\n" if ($nums_ref->{trim_file_name_2});
+              }
               close KMEROUT; 
           }
 
@@ -408,6 +486,8 @@ if (! $qc_only)
     }  
 }
 
+
+
 &Kmer_rarefaction() if ($kmer_rarefaction_on); 
 &print_quality_report_files();
 &print_final_stats();
@@ -427,12 +507,58 @@ unlink $kmer_files;
 }
 exit(0);
 
+sub build_initial_quality_matrix  # not used yet
+{
+    my $fastqFile=shift;
+    open (my $fh, "$fastqFile") or die "$fastqFile $!";
+    my %basequal;
+    my $total_reads=0;
+    while(<$fh>)
+    {
+        last if ($total_reads>2000000);
+        my $name=$_;
+        my $seq=<$fh>;
+        $seq =~ s/\n//g;
+        while ($seq !~ /\+/)
+        {
+           $seq .= <$fh>;
+           $seq =~ s/\n//g;
+        }
+        my $q_id_pos=index($seq,"+");
+        $seq = substr($seq, 0, $q_id_pos);
+        my $seq_len = length $seq;
+        my $qual_seq=<$fh>;
+        $qual_seq =~ s/\n//g;
+        my $qual_seq_len = length $qual_seq;
+        while ( $qual_seq_len < $seq_len )
+        {
+           last if ( $qual_seq_len == $seq_len);
+           $qual_seq .= <$fh>;
+           $qual_seq =~ s/\n//g;
+           $qual_seq_len = length $qual_seq;
+        }
+        my @qual_seq=split //, $qual_seq;
+
+        if (rand() <=0.2) {
+           $total_reads++;
+           for my $pos(0..$#qual_seq)
+           {
+              push @{$basequal{$pos}}, ord($qual_seq[$pos])-$ascii;
+           }
+        }
+    }
+    close $fh;
+    @{$basequal{$_}}= sort {$a <=> $b} @{$basequal{$_}} foreach (keys %basequal);
+
+    return \%basequal;
+}
+
 sub run_kmercount 
 {
     my $hash_ref =shift;
     my $kmer =shift;
     my $mate = shift;
-    my $file= $hash_ref->{"trim_file_name_$mate"};
+    my $file= ($qc_only)?$hash_ref->{"file_name_$mate"}:$hash_ref->{"trim_file_name_$mate"};
     my $cmd = "jellyfish count -C -s 512M -c 3 -m $kmer -o $file$prefix $file";
     if (system($cmd)){
       die "$!\n";
@@ -491,37 +617,109 @@ sub Kmer_rarefaction {
 
 sub print_final_stats{
     open (my $fh, ">$stats_output") or die "$!\t$stats_output\n";
+    $readsFilterByLen = $filter_stats{len}->{readsNum};
+    $basesFilterByLen = $filter_stats{len}->{basesNum};
+    $readsTrimByQual = $filter_stats{qualTrim}->{readsNum};
+    $basesTrimByQual = $filter_stats{qualTrim}->{basesNum};
+    $readsFilterByNN = $filter_stats{NN}->{readsNum};
+    $basesFilterByNN = $filter_stats{NN}->{basesNum};
+    $readsFilterByPhiX = $filter_stats{phiX}->{readsNum};
+    $basesFilterByPhiX = $filter_stats{phiX}->{basesNum};
+    $readsTrimByAdapter = $filter_stats{adapter}->{readsNum};
+    $basesTrimByAdapter = $filter_stats{adapter}->{basesNum};
+    $readsFilterByAvgQ = $filter_stats{AvgQ}->{readsNum};
+    $basesFilterByAvgQ = $filter_stats{AvgQ}->{basesNum};
+    $readsFilterByLowComplexity = $filter_stats{lowComplexity}->{readsNum};
+    $basesFilterByLowComplexity = $filter_stats{lowComplexity}->{basesNum};
     # stats
-    print $fh "\nBefore Trimming\n";
-    print $fh "Reads #:\t$total_num\n";
-    print $fh "Total bases:\t$total_raw_seq_len\n";
-    printf $fh ("Reads Length:\t%.2f\n",$total_raw_seq_len/$total_num);
-    
-    print $fh "\nAfter Trimming\n";
-    printf $fh ("Reads #:\t\%d (%.2f %%)\n",$trimmed_num, $trimmed_num/$total_num*100);
-    printf $fh ("Total bases:\t\%d (%.2f %%)\n",$total_trimmed_seq_len,$total_trimmed_seq_len/$total_raw_seq_len*100);
-    if ($trimmed_num)
+    if ($qc_only)
     {
-      printf $fh ("Mean Reads Length:\t%.2f\n",$total_trimmed_seq_len/$trimmed_num); 
-    }
+      print $fh "\n";
+      print $fh "Reads: $total_count\n";
+      print $fh "Total bases: $total_len\n";
+      printf $fh ("Reads Length: %.2f\n",$total_len/$total_count);
+      print $fh "Processed $total_num reads for quality check only\n";
+      
+      printf $fh ("  Reads length < %d bp: %d (%.2f %%)\n", $opt_min_L, $readsFilterByLen , ($readsFilterByLen)/$total_num*100);
+      printf $fh ("  Reads have %d continuous base \"N\": %d (%.2f %%)\n", $N_num_cutoff, $readsFilterByNN , ($readsFilterByNN)/$total_num*100);
+      printf $fh ("  Low complexity Reads  (>%.2f%% mono/di-nucleotides): %d (%.2f %%)\n", $low_complexity_cutoff_ratio*100, $readsFilterByLowComplexity , ($readsFilterByLowComplexity)/$total_num*100);
+      printf $fh ("  Reads < average quality %.1f: %d (%.2f %%)\n", $opt_avg_cutoff, $readsFilterByAvgQ , ($readsFilterByAvgQ)/$total_num*100);
+      printf $fh ("  Reads hits to phiX sequence: %d (%.2f %%)\n", $readsFilterByPhiX , ($readsFilterByPhiX)/$total_num*100) if ($filter_phiX);
+      if ($filter_adapter)
+      {
+        printf $fh ("  Reads with Adapters/Primers: %d (%.2f %%)\n", $readsTrimByAdapter , ($readsTrimByAdapter)/$total_num*100);
+        foreach my $adapter_id (keys %EachAdapter)
+        {
+            my $affect_reads = $EachAdapter{$adapter_id}->{readsNum};
+            my $affect_bases = $EachAdapter{$adapter_id}->{basesNum};
+            printf $fh ("    %s %d reads (%.2f %%) %d bases (%.2f %%)\n", $adapter_id, $affect_reads, $affect_reads/$total_num*100,$affect_bases, $affect_bases/$total_raw_seq_len*100);
+        }
+      }
+    } 
     else
     {
-      printf $fh "Mean Reads Length:\t0\n";
-    }
+ #     print $fh "\nQC process\n";
+      print $fh "Before Trimming\n";
+      print $fh "Reads: $total_num\n";
+      print $fh "Total bases: $total_raw_seq_len\n";
+      printf $fh ("Reads Length: %.2f\n",$total_raw_seq_len/$total_num);
     
-    if (@paired_files){
-      printf $fh ("  Paired Reads #:\t\%d (%.2f %%)\n",$paired_seq_num, $paired_seq_num/$trimmed_num*100);
-      printf $fh ("  Paired total bases:\t\%d (%.2f %%)\n",$total_paired_bases,$total_paired_bases/$total_trimmed_seq_len*100);
-      printf $fh ("  Unpaired Reads #:\t\%d (%.2f %%)\n", $trimmed_num - $paired_seq_num, ($trimmed_num - $paired_seq_num)/$trimmed_num*100);
-      printf $fh ("  Unpaired total bases:\t\%d (%.2f %%)\n", $total_trimmed_seq_len - $total_paired_bases , ($total_trimmed_seq_len - $total_paired_bases)/$total_trimmed_seq_len*100);
-    }
+      print $fh "\nAfter Trimming\n";
+      printf $fh ("Reads: %d (%.2f %%)\n",$trimmed_num, $trimmed_num/$total_num*100);
+      printf $fh ("Total bases: %d (%.2f %%)\n",$total_trimmed_seq_len,$total_trimmed_seq_len/$total_raw_seq_len*100);
+      if ($trimmed_num)
+      {
+        printf $fh ("Mean Reads Length: %.2f\n",$total_trimmed_seq_len/$trimmed_num); 
+      }
+      else
+      {
+        printf $fh "Mean Reads Length: 0\n";
+      }
     
-    if ($filter_adapter){
-        printf $fh ("\nReads with Adapters/Primers #:\t\%d (%.2f %%)", $numOfReadsWithAdapter , ($numOfReadsWithAdapter)/$total_num*100);
-    }
-    printf $fh ("\nDiscarded reads #:\t\%d (%.2f %%)\n", $total_num - $trimmed_num , ($total_num - $trimmed_num)/$total_num*100);
-    printf $fh ("Trimmed bases:\t\%d (%.2f %%)\n", $total_raw_seq_len - $total_trimmed_seq_len, ($total_raw_seq_len - $total_trimmed_seq_len)/$total_raw_seq_len*100);
+      if (@paired_files){
+        printf $fh ("  Paired Reads: %d (%.2f %%)\n",$paired_seq_num, $paired_seq_num/$trimmed_num*100);
+        printf $fh ("  Paired total bases: %d (%.2f %%)\n",$total_paired_bases,$total_paired_bases/$total_trimmed_seq_len*100);
+        printf $fh ("  Unpaired Reads: %d (%.2f %%)\n", $trimmed_num - $paired_seq_num, ($trimmed_num - $paired_seq_num)/$trimmed_num*100);
+        printf $fh ("  Unpaired total bases: %d (%.2f %%)\n", $total_trimmed_seq_len - $total_paired_bases , ($total_trimmed_seq_len - $total_paired_bases)/$total_trimmed_seq_len*100);
+      }
     
+      printf $fh ("\nDiscarded reads: %d (%.2f %%)\n", $total_num - $trimmed_num , ($total_num - $trimmed_num)/$total_num*100);
+      printf $fh ("Trimmed bases: %d (%.2f %%)\n", $total_raw_seq_len - $total_trimmed_seq_len, ($total_raw_seq_len - $total_trimmed_seq_len)/$total_raw_seq_len*100);
+      printf $fh ("  Reads Filtered by length cutoff (%d bp): %d (%.2f %%)\n", $opt_min_L, $readsFilterByLen , ($readsFilterByLen)/$total_num*100);
+      printf $fh ("  Bases Filtered by length cutoff: %d (%.2f %%)\n", $basesFilterByLen , ($basesFilterByLen)/$total_raw_seq_len*100);
+      printf $fh ("  Reads Filtered by continuous base \"N\" (%d): %d (%.2f %%)\n", $N_num_cutoff, $readsFilterByNN , ($readsFilterByNN)/$total_num*100);
+      printf $fh ("  Bases Filtered by continuous base \"N\": %d (%.2f %%)\n", $basesFilterByNN , ($basesFilterByNN)/$total_raw_seq_len*100);
+      printf $fh ("  Reads Filtered by low complexity ratio (%.1f): %d (%.2f %%)\n", $low_complexity_cutoff_ratio, $readsFilterByLowComplexity , ($readsFilterByLowComplexity)/$total_num*100);
+      printf $fh ("  Bases Filtered by low complexity ratio: %d (%.2f %%)\n", $basesFilterByLowComplexity , ($basesFilterByLowComplexity)/$total_raw_seq_len*100);
+      if ($opt_avg_cutoff>0)
+      {
+        printf $fh ("  Reads Filtered by avg quality (%.1f): %d (%.2f %%)\n", $opt_avg_cutoff, $readsFilterByAvgQ , ($readsFilterByAvgQ)/$total_num*100);
+        printf $fh ("  Bases Filtered by avg quality: %d (%.2f %%)\n", $basesFilterByAvgQ , ($basesFilterByAvgQ)/$total_raw_seq_len*100);
+      }
+      if ($filter_phiX)
+      {
+        printf $fh ("  Reads Filtered by phiX sequence: %d (%.2f %%)\n", $readsFilterByPhiX , ($readsFilterByPhiX)/$total_num*100);
+        printf $fh ("  Bases Filtered by phiX sequence: %d (%.2f %%)\n", $basesFilterByPhiX , ($basesFilterByPhiX)/$total_raw_seq_len*100);
+      }
+      printf $fh ("  Reads Trimmed by quality (%.1f): %d (%.2f %%)\n", $opt_q, $readsTrimByQual , ($readsTrimByQual)/$total_num*100);
+      printf $fh ("  Bases Trimmed by quality: %d (%.2f %%)\n", $basesTrimByQual , ($basesTrimByQual)/$total_raw_seq_len*100);
+      if ($filter_adapter){
+        printf $fh ("  Reads Trimmed with Adapters/Primers: %d (%.2f %%)\n", $readsTrimByAdapter , ($readsTrimByAdapter)/$total_num*100);
+        printf $fh ("  Bases Trimmed with Adapters/Primers: %d (%.2f %%)\n", $basesTrimByAdapter , ($basesTrimByAdapter)/$total_raw_seq_len*100);
+        foreach my $adapter_id (keys %EachAdapter)
+        {
+            my $affect_reads = $EachAdapter{$adapter_id}->{readsNum};
+            my $affect_bases = $EachAdapter{$adapter_id}->{basesNum};
+            printf $fh ("    %s %d reads (%.2f %%) %d bases (%.2f %%)\n", $adapter_id, $affect_reads, $affect_reads/$total_num*100,$affect_bases, $affect_bases/$total_raw_seq_len*100);
+        }
+      }
+      if ($replace_N)
+      {
+          printf $fh ("\nN base random substitution: A %d, T %d, C %d, G %d\n",$EachReplaceN{A},$EachReplaceN{T},$EachReplaceN{C},$EachReplaceN{G});
+      }
+    } # end qc only
+    
+
     return (0);
 }
 
@@ -533,56 +731,31 @@ sub plot_by_R
 def.par <- par(no.readonly = TRUE) # get default parameters
 
 pdf(file = \"$plots_file\",width = 10, height = 8)
-#trimmed summary
-txt<-c(
-"Before Trimming",
-paste("Reads #:", prettyNum(\"$total_num\",big.mark=",")),
-paste("Total bases:", prettyNum(\"$total_raw_seq_len\",big.mark=",")),
-paste("Reads Length:",sprintf("%.2f",$total_raw_seq_len/$total_num)),
-" ",
-"After Trimming",
-paste("Reads #:", prettyNum(\"$trimmed_num\",big.mark=","),sprintf("(%.2f %%)", $trimmed_num/$total_num*100)),
-paste("Total bases:",prettyNum(\"$total_trimmed_seq_len\",big.mark=","),sprintf("(%.2f %%)",$total_trimmed_seq_len/$total_raw_seq_len*100))
-)
-
-
-
-if($trimmed_num>0)
-{
-txt<-c(txt,
-paste("Mean Reads Length:", sprintf("%.2f",$total_trimmed_seq_len/$trimmed_num))
-)
+#Summary
+par(family="mono")
+SummaryStats<-readLines("$stats_output")
+plot(0:1,0:1,type=\'n\',xlab=\"\",ylab=\"\",xaxt=\'n\',yaxt=\'n\',bty=\'n\')
+if ($qc_only){
+  for (i in 1:length(SummaryStats)){
+     text(0.05,1-0.04*(i-1),SummaryStats[i],adj=0,font=2,cex=1)
+  }
+}else{
+  adjust<-11
+  if ($#paired_files > 0) adjust <-14
+  for (i in 1:length(SummaryStats)){
+     if (i>5 && i<adjust){
+       text(0.45,1-0.035*(i-6),SummaryStats[i],adj=0,font=2,cex=0.9)
+     }else if(i >=adjust){
+       text(0.05,1-0.035*(i-6),SummaryStats[i],adj=0,font=2,cex=0.9)
+     }else{
+       text(0.05,1-0.035*(i-1),SummaryStats[i],adj=0,font=2,cex=0.9)
+     }
+  }
 }
-
-if($paired_seq_num >0){
-     txt <- c(txt, 
- paste("  Paired Reads #: ", prettyNum(\"$paired_seq_num\",big.mark=","), sprintf("(%.2f %%)", $paired_seq_num/$trimmed_num*100)),
- paste("  Paired total bases: ", prettyNum(\"$total_paired_bases\",big.mark=","),sprintf("(%.2f %%)",$total_paired_bases/$total_trimmed_seq_len*100)),
- paste("  Unpaired Reads: ", prettyNum($trimmed_num - $paired_seq_num,big.mark=","),sprintf("(%.2f %%)", ($trimmed_num - $paired_seq_num)/$trimmed_num*100)),
- paste("  Unpaired total bases: ",prettyNum($total_trimmed_seq_len - $total_paired_bases,big.mark=","),sprintf("(%.2f %%)" , ($total_trimmed_seq_len - $total_paired_bases)/$total_trimmed_seq_len*100))
- )
-}
-
-txt<-  c( txt, " ")
-if ($filter_adapter)
-{
-   txt<-  c( txt,
-   paste("Reads with Adapters/Primers #: ", prettyNum($numOfReadsWithAdapter,big.mark=","), sprintf("(%.2f %%)", ($numOfReadsWithAdapter)/$total_num*100))
-   )
-}
-    txt<-  c( txt,
-   paste("Discarded reads #: ", prettyNum($total_num - $trimmed_num,big.mark=","), sprintf("(%.2f %%)", ($total_num - $trimmed_num)/$total_num*100)),
-   paste("Discarded bases: ",prettyNum($total_raw_seq_len - $total_trimmed_seq_len,big.mark=","),sprintf("(%.2f %%)",  ($total_raw_seq_len - $total_trimmed_seq_len)/$total_raw_seq_len*100))
-  )
-
-
-plot(1:80,xaxt=\'n\',yaxt=\'n\',type=\'n\',ylab=\'\',xlab=\'\')
 #title(paste(\"$prefix\",\"QC report\"),sub = 'DOE Joint Genome Institute/Los Alamos National Laboratory', adj = 0.5, col.sub='darkblue',font.sub=2,cex.sub=0.8)
-for (i in seq(along=txt))
-{
- text(1,(85-i*5),txt[i],adj=0,font=2)
-}
+title("QC stats")
  
+par(family="")
 
 #lenght histogram
 lengthfile<-read.table(file=\"$length_histogram\")
@@ -678,6 +851,7 @@ if ($N_num_cutoff >0){
 #N composition per Base plot
 plot(xpos,nBase/$trimmed_num*1000000,col=\'red\',type=\'l\',xaxt=\'n\',xlab=\'Position\',ylab=\'N Base count per million reads\',ylim=c(0,max(nBase/$trimmed_num*1000000)))
 axis(1,at=xpos,labels=xpos)
+legend(\'topright\',paste(\"Total bases: \",sum(nBase)),bty='n')
 title(\"N Nucleotide Content Per Cycle\")
 }
 
@@ -814,10 +988,12 @@ atleast30columnNum<-$highest_illumina_score-30+1
 color<-c(rep(\'blue\',less30columnNum),rep(\'darkgreen\',atleast30columnNum))
 over30per<-sprintf(\"%.2f%%\",sum(col[(less30columnNum+1):length(col)])/sum(col)*100)
 countInM<-col/1000000
+avgQ<-sprintf(\"%.2f\",sum(seq(0,41,1)*col)/sum(col))
 plot(seq($lowest_illumina_score,$highest_illumina_score,1),countInM,col=color,type='h',ylab=\"Total (million)\",xlab=\"Q score\",lwd=12,lend=2,bty='n')
 abline(v=29.5,col='darkgreen')
 text(30,(max(countInM)-min(countInM))*0.9,labels=\">=Q30\",cex=0.8,adj=0,col=\'darkgreen\')
 text(30,(max(countInM)-min(countInM))*0.85,labels=over30per,cex=0.8,adj=0,col=\'darkgreen\')
+legend('topleft',paste(\"Average: \",avgQ),bty='n')
 title(\"Quality report\")
 
 tmp<-dev.off()
@@ -830,6 +1006,7 @@ RSCRIPT
     system ("R --vanilla --silent --quiet < $outDir/tmp$$.R 1>/dev/null");
     unless ($debug){system ("rm $outDir/tmp$$.*");}
     system ("rm $outDir/Rplots.pdf") if (-e "$outDir/Rplots.pdf");
+    system ("rm Rplots.pdf") if (-e "Rplots.pdf");
 }
 
 sub print_quality_report_files{
@@ -926,15 +1103,15 @@ sub qc_process {
   my ($h1,$s,$s_trimmed,$h2,$q, $q_trimmed); my $len=0; my $trim_len=0;
   my ($r2_h1,$r2_s,$r2_s_trimmed,$r2_h2,$r2_q,$r2_q_trimmed); my $r2_len=0; my $r2_trim_len=0;
   my %stats;
+  $stats{filter}->{adapter}->{readsNum}=0;
   my $seq_r;
   my $avg_q;
   my ($pos5,$pos3);
-  my $numOfReadsWithAdapter;
-  my ($raw_seq_num,$total_raw_seq_len);
+  my ($raw_seq_num_1,$raw_seq_num_2,$total_raw_seq_len);
   my ($trim_seq_num_1,$trim_seq_num_2,$trim_seq_len, $total_trim_seq_len,@trim_seq_len);
   my ($paired_seq_num,$total_paired_bases); 
   my (%tmp1,%tmp2);
-  my ($drop_1,$drop_2)=(1,1);
+  my ($drop_1,$drop_2)=(0,0);
   my ( $i_file_name, $i_path, $i_suffix ) = fileparse( "$input", qr/\.[^.]*/ );
   my $trim_output_1="$outDir/${i_file_name}_trim.fastq";
   my $trim_output_2;
@@ -961,7 +1138,7 @@ sub qc_process {
 
   while ($h1 = <IN>) {  # read first header
         $drop_1=0;
-        $raw_seq_num++;
+        $raw_seq_num_1++;
         $s = <IN>;  # read sequence
         chomp $s;
         $h2 = <IN>;  # read second header
@@ -969,23 +1146,89 @@ sub qc_process {
         chomp $q;
         $len = length($q);
         $total_raw_seq_len += $len;
+        $s_trimmed=$s;
+        $q_trimmed=$q;
+        $pos5=0;
+        $pos3=$len+1;
+        $trim_len=$len;
         if ($filter_adapter)
         {
-            $drop_1=&filter_adapter($s,$filterAdapterMismatchRate);
-            $numOfReadsWithAdapter++ if ($drop_1);
-            $drop_1 =0 if ($qc_only);
+            (my $adapterFlag, $s_trimmed,$pos5,$pos3, my $adapterID)=&filter_adapter($s,$filterAdapterMismatchRate);
+            if ($adapterFlag) 
+            {
+                $q_trimmed=substr($q,$pos5,$pos3-$pos5-1);
+                $trim_len=length($s_trimmed);
+                $stats{adapter}->{$adapterID}->{readsNum}++;
+                $stats{adapter}->{$adapterID}->{basesNum} += ($len - $trim_len);
+                $stats{filter}->{adapter}->{readsNum}++;
+                $stats{filter}->{adapter}->{basesNum} += ($len - $trim_len);
+            }
         }
-        $drop_1=1 if ($len < $opt_min_L);
-        if ($drop_1==0){
-           
-           ($s_trimmed,$q_trimmed,$pos5,$pos3)= &bwa_trim ($len,$s,$q);
-           $trim_len=length($q_trimmed); 
-           $drop_1=1 if ($trim_len < $opt_min_L);
+        #apply length filter
+        if ($trim_len < $opt_min_L || $trim_len == 0)
+        {
+            $stats{filter}->{len}->{readsNum}++;
+            $stats{filter}->{len}->{basesNum}+=$trim_len;
+            $drop_1=1;
+        }
+        if ($qc_only)
+        {
+            $drop_1 =0;
+            $s_trimmed=$s;
+            $q_trimmed=$q;
+            $pos5=0;
+            $pos3=$len+1;
+            $trim_len=$len;
+        } 
+        else # do quality trim
+        {
+            if ($drop_1==0){
+               my $before_trim_len=$trim_len;
+               if ($mode =~ /hard/i)
+               {
+                   ($s_trimmed,$q_trimmed,$pos5,$pos3)= &hard_trim ($trim_len,$s_trimmed,$q_trimmed,$pos5,$pos3);
+               }
+               else
+               {
+                   ($s_trimmed,$q_trimmed,$pos5,$pos3)= &bwa_trim ($trim_len,$s_trimmed,$q_trimmed,$pos5,$pos3);
+               }
+               $trim_len=length($q_trimmed);
+               $stats{filter}->{qualTrim}->{basesNum}+= ($before_trim_len - $trim_len);
+               $stats{filter}->{qualTrim}->{readsNum}++ if ( ($before_trim_len - $trim_len)>0);
+               # apply length filter, trimming, "N" filter
+               if ($trim_len < $opt_min_L || $trim_len == 0 )
+               {
+                   $stats{filter}->{len}->{readsNum}++;
+                   $stats{filter}->{len}->{basesNum}+=$trim_len;
+                   $drop_1=1;
+               }
+            }
+        }
+        # "N" filter
+        if ($s_trimmed =~ /N{$N_num_cutoff,}/i and $drop_1==0)
+        {
+            $stats{filter}->{NN}->{readsNum}++;
+            $stats{filter}->{NN}->{basesNum}+=$trim_len;
+            $drop_1=1;
+            $drop_1=0 if ($qc_only);
+        }
+        if ($filter_phiX and $drop_1==0)
+        {
+           my $phiX_Flag=&filter_phiX($s_trimmed,$filterAdapterMismatchRate);
+           if ($phiX_Flag)
+           {
+               $stats{filter}->{phiX}->{readsNum}++; 
+               $stats{filter}->{phiX}->{basesNum}+=$trim_len; 
+               $drop_1=1;
+           }
+           $drop_1=0 if ($qc_only);
         }
         if ($drop_1==0)
         {
-            ($seq_r,$drop_1)=&get_base_and_quality_info($s_trimmed,$q_trimmed,$trim_len,$pos5,$pos3,\%stats);
+          #     print "drop1\t",$drop_1,"\t";
+            ($seq_r,$drop_1,$s_trimmed)=&get_base_and_quality_info($s_trimmed,$q_trimmed,$trim_len,$pos5,$pos3,\%stats);
             %stats=%{$seq_r};
+         #   print $drop_1,"\n";
         }
         if ($drop_1==0){  # pass all filters...
             $q_trimmed=&quality_encoding_coversion($q_trimmed,$ascii,$out_offset) if ($ascii != $out_offset);
@@ -997,7 +1240,7 @@ sub qc_process {
         if ($input2) {
            $drop_2=0;
            $r2_h1 = <IN2>;
-           $raw_seq_num++;
+           $raw_seq_num_2++;
            $r2_s = <IN2>;  # mate read sequence
            chomp $r2_s;
            $r2_h2 = <IN2>;  # mate read second header
@@ -1005,22 +1248,88 @@ sub qc_process {
            chomp $r2_q;
            $r2_len = length($r2_q);
            $total_raw_seq_len += $r2_len;
+           $r2_s_trimmed=$r2_s;
+           $r2_q_trimmed=$r2_q;
+           $pos5=0;
+           $pos3=$r2_len+1;
+           $r2_trim_len=$r2_len;
+
            if ($filter_adapter)
            {
                $drop_2=&filter_adapter($r2_s,$filterAdapterMismatchRate);
-               $numOfReadsWithAdapter++ if ($drop_2);
-               $drop_2 =0 if ($qc_only);
+               (my $adapterFlag, $r2_s_trimmed,$pos5,$pos3, my $adapterID)=&filter_adapter($r2_s,$filterAdapterMismatchRate);
+               if ($adapterFlag) 
+               {
+                   $r2_q_trimmed=substr($r2_q,$pos5,$pos3-$pos5-1);
+                   $r2_trim_len=length($r2_s_trimmed);
+                   $stats{adapter}->{$adapterID}->{readsNum}++;
+                   $stats{adapter}->{$adapterID}->{basesNum} += ($r2_len - $r2_trim_len);
+                   $stats{filter}->{adapter}->{readsNum}++;
+                   $stats{filter}->{adapter}->{basesNum} += ($r2_len - $r2_trim_len);
+               }
            }
-           $drop_2=1 if ($r2_len < $opt_min_L);
-           if ($drop_2==0){
-              ($r2_s_trimmed, $r2_q_trimmed, $pos5, $pos3)=&bwa_trim ($r2_len,$r2_s,$r2_q);
-               $r2_trim_len=length($r2_q_trimmed);
-               $drop_2=1 if ($r2_trim_len < $opt_min_L);
+           if ($r2_trim_len < $opt_min_L || $r2_trim_len == 0)
+           {
+               $stats{filter}->{len}->{readsNum}++;
+               $stats{filter}->{len}->{basesNum}+=$r2_trim_len;
+               $drop_2=1;
+           }
+           if ($qc_only)
+           {
+               $drop_2 =0;
+               $r2_s_trimmed=$r2_s;
+               $r2_q_trimmed=$r2_q;
+               $pos5=0;
+               $pos3=$r2_len+1;
+               $r2_trim_len=$r2_len;
+           } 
+           else  # do quality trim
+           {
+               if ($drop_2==0){
+                   my $before_trim_len=$r2_trim_len;
+                   if ($mode =~ /hard/i)
+                   {
+                       ($r2_s_trimmed, $r2_q_trimmed, $pos5, $pos3)=&hard_trim ($r2_trim_len,$r2_s_trimmed,$r2_q_trimmed,$pos5,$pos3);
+                   }
+                   else
+                   {
+                       ($r2_s_trimmed, $r2_q_trimmed, $pos5, $pos3)=&bwa_trim ($r2_trim_len,$r2_s_trimmed,$r2_q_trimmed,$pos5,$pos3);
+                   }
+                   $r2_trim_len=length($r2_q_trimmed);
+                   $stats{filter}->{qualTrim}->{basesNum}+= ($before_trim_len - $r2_trim_len);
+                   $stats{filter}->{qualTrim}->{readsNum}++ if ( ($before_trim_len - $r2_trim_len)>0);
+                   if ($r2_trim_len < $opt_min_L || $r2_trim_len == 0 )
+                   {
+                       $stats{filter}->{len}->{readsNum}++;
+                       $stats{filter}->{len}->{basesNum} += $r2_trim_len;
+                       $drop_2=1;
+                   }
+               }
+           }
+           if ($r2_s_trimmed =~ /N{$N_num_cutoff,}/i and $drop_2==0)
+           {
+               $stats{filter}->{NN}->{readsNum}++;
+	       $stats{filter}->{NN}->{basesNum}+=$r2_trim_len;
+               $drop_2=1;
+               $drop_2=0 if ($qc_only);
+           }
+           if ($filter_phiX and $drop_2==0)
+           {
+               my $phiX_Flag=&filter_phiX($r2_s_trimmed,$filterAdapterMismatchRate);
+               if ($phiX_Flag)
+               {
+                   $stats{filter}->{phiX}->{readsNum}++; 
+                   $stats{filter}->{phiX}->{basesNum}+=$r2_trim_len; 
+                   $drop_2=1;
+               }
+               $drop_2=0 if ($qc_only);
            }
            if ($drop_2==0)
            {
-               ($seq_r,$drop_2)=&get_base_and_quality_info($r2_s_trimmed,$r2_q_trimmed,$r2_trim_len,$pos5,$pos3,\%stats);
+           #    print "drop2\t",$drop_2,"\t";
+               ($seq_r,$drop_2,$r2_s_trimmed)=&get_base_and_quality_info($r2_s_trimmed,$r2_q_trimmed,$r2_trim_len,$pos5,$pos3,\%stats);
                %stats=%{$seq_r};
+            #   print $drop_2,"\n";
            }
           
            if ($drop_2==0){ # pass all filters
@@ -1080,7 +1389,9 @@ sub qc_process {
   close OUT2 if ($input2);
   close UNPAIR if ($input2);
   close DISCARD;
-  $stats{raw_seq_num}=$raw_seq_num;
+  $stats{raw_seq_num}=$raw_seq_num_1+$raw_seq_num_2;
+  $stats{raw_seq_num_1}=$raw_seq_num_1;
+  $stats{raw_seq_num_2}=$raw_seq_num_2;
   $stats{trim_seq_num}=$trim_seq_num_1+$trim_seq_num_2;
   $stats{trim_seq_num_1}=$trim_seq_num_1;
   $stats{trim_seq_num_2}=$trim_seq_num_2;
@@ -1093,9 +1404,10 @@ sub qc_process {
   $stats{median}=$median;
   $stats{paired_seq_num}=$paired_seq_num;
   $stats{total_paired_bases}=$total_paired_bases;
+  $stats{file_name_1}=$input;
+  $stats{file_name_2}=$input2;
   $stats{trim_file_name_1}=$trim_output_1;
   $stats{trim_file_name_2}=$trim_output_2;
-  $stats{numOfReadsWithAdapter}=$numOfReadsWithAdapter;
   return \%stats;
 }
 
@@ -1116,10 +1428,10 @@ sub filters  # not used
 sub bwa_trim2
 {
         # bwa trim implementation from both 5' and 3' end
-        my ($len,$s,$q) = @_;
+        my ($len,$s,$q,$final_pos_5,$final_pos_3) = @_;
         # trim 3' end
         my $pos_3 = $len;
-        my $final_pos_3 =$pos_3+1;  
+ #       my $final_pos_3 =$pos_3+1;  
         my $area=0;  
         my $maxArea=0;
         
@@ -1133,7 +1445,7 @@ sub bwa_trim2
 	}
         # trim 5' end
         my $pos_5=1; 
-        my $final_pos_5=0;
+  #      my $final_pos_5=0;
         $maxArea=0;
         $area=0;
 	while ($pos_5<$final_pos_3 and $area>=0) {
@@ -1150,17 +1462,48 @@ sub bwa_trim2
         return ($s,$q,$final_pos_5,$final_pos_3);
 }
 
+sub hard_trim 
+{
+    my ($len,$s,$q, $final_pos_5, $final_pos_3) =@_;
+    # trim 3' end
+    my $pos_3 = $len;   
+    while($pos_3 >0)
+    {
+        if ($opt_q < (ord(substr($q,$pos_3-1,1))-$ascii) )
+        {
+            $final_pos_3=$pos_3+1;
+            last;
+        }
+        $pos_3--;
+    }
+    # trim 5' end
+    my $pos_5=$final_pos_5; 
+    while($pos_5<$pos_3)
+    {
+        if ($opt_q < (ord(substr($q,$pos_5,1))-$ascii) )
+	{
+	    $final_pos_5=$pos_5;
+	    last;
+	}
+        $pos_5++;
+    }
+    $s = substr($s,$final_pos_5,$final_pos_3-$final_pos_5-1);
+    $q = substr($q,$final_pos_5,$final_pos_3-$final_pos_5-1);
+    return ($s,$q,$final_pos_5,$final_pos_3);
+}
+
 sub bwa_trim
 {
     # bwa trim implementation from both 5' and 3' end
     # at least scan 5 bases from both end and 2 more bases after the negative area
-    my ($len,$s,$q) = @_;
+    my ($len,$s,$q,$final_pos_5,$final_pos_3) = @_;
     my $at_least_scan=5;
     my $num_after_neg=2;
-      
+    $at_least_scan = $len if $len <5;
+    $num_after_neg = $len if $len <2;
     # trim 3' end
     my $pos_3 = $len;
-    my $final_pos_3 =$pos_3+1;  
+ #   my $final_pos_3 =$pos_3+1;  
     my $area=0;  
     my $maxArea=0;
     while ($at_least_scan) 
@@ -1175,11 +1518,12 @@ sub bwa_trim
 	    $pos_3--;
     }
     # trim 5' end
-    my $pos_5=1; 
-    my $final_pos_5=0;
+    my $pos_5=$final_pos_5+1; 
+  #  my $final_pos_5=0;
     $maxArea=0;
     $area=0;
     $at_least_scan=5;
+    $at_least_scan = $len if $len <5;
     while ($at_least_scan) 
     {
         $at_least_scan--; 
@@ -1191,7 +1535,6 @@ sub bwa_trim
 	    }
 	    $pos_5++;
     }
-    
     if ($final_pos_3<=$final_pos_5)
     {
         # since at least scan 5 bases, we need to avoid negative length on substr
@@ -1219,59 +1562,84 @@ sub get_base_and_quality_info
      my $total_q=0;
      my $avg_q=0;
      my $drop=0;
+     my $low_complexity_flag=0;
+     my $new_s=$s;
      my ($a_Base,$t_Base,$c_Base,$g_Base,$n_Base)=(0,0,0,0,0);
      my ($a_Base_percent,$t_Base_percent,$c_Base_percent,$g_Base_percent,$n_Base_percent);
      my $base_percent_string;
      my ($previous_base,$dinucleotide,%di_nucleotide);
+     my @N_pos;
      my %seq=%{$stats};
      $start_pos++;
      $end_pos--;
+     
      for my $pos($start_pos..$end_pos)
      {
          my $q_digit=ord(substr($q,$pos-$start_pos,1))-$ascii;
-         $drop=1 if ($q_digit < $stringent_cutoff);
+         #$drop=1 if ($q_digit < $stringent_cutoff);
          $seq{qual}->{$pos}->{$q_digit}++;
          $total_q += $q_digit; 
          my $base=uc(substr($s,$pos-$start_pos,1));
-         $seq{base}->{$pos}->{$base}++;
          $a_Base++ if ($base =~ /A/);  
          $t_Base++ if ($base =~ /T/);  
          $c_Base++ if ($base =~ /C/);  
          $g_Base++ if ($base =~ /G/);  
-         $n_Base++ if ($base =~ /N/);  
+         if ($base =~ /N/)
+         {
+             $n_Base++;
+             if ($replace_N and !$qc_only)
+             {
+                my $rand_base = &rand_base;
+                substr($new_s,$pos-$start_pos,1,$rand_base);
+                $seq{replaceN}->{$rand_base}++;
+             }
+         }
          if ($previous_base and ($previous_base ne $base))
          {
             $dinucleotide = $previous_base.$base;
             $di_nucleotide{$dinucleotide}++;
          }
          $previous_base=$base;
+         $seq{base}->{$pos}->{$base}++;
      }
      $avg_q = int ($total_q/$len);
-     if (!$qc_only)
-     {
-         # apply filters: N num, average quality, low complexity
-         $drop=1 if ($n_Base>$N_num_cutoff);
-         $drop=1 if ($avg_q < $opt_avg_cutoff);
-         $drop=1 if (($a_Base/$len) >= $low_complexity_cutoff_ratio);
-         $drop=1 if (($t_Base/$len) >= $low_complexity_cutoff_ratio);
-         $drop=1 if (($c_Base/$len) >= $low_complexity_cutoff_ratio);
-         $drop=1 if (($g_Base/$len) >= $low_complexity_cutoff_ratio);
+   #  if (!$qc_only)
+   #  {
+         # apply filters:, average quality, low complexity
+         #$drop=1 if ($n_Base>$N_num_cutoff);
+         if ($avg_q < $opt_avg_cutoff)
+         {
+             $seq{filter}->{AvgQ}->{readsNum}++;
+             $seq{filter}->{AvgQ}->{basesNum}+=$len;
+             $drop=1;
+         }
+         $low_complexity_flag=1 if ((($a_Base/$len) > $low_complexity_cutoff_ratio) and $drop==0);
+         $low_complexity_flag=1 if ((($t_Base/$len) > $low_complexity_cutoff_ratio) and $drop==0);
+         $low_complexity_flag=1 if ((($c_Base/$len) > $low_complexity_cutoff_ratio) and $drop==0);
+         $low_complexity_flag=1 if ((($g_Base/$len) > $low_complexity_cutoff_ratio) and $drop==0);
          if ($drop == 0)
          {
            foreach my $di_nuc (keys %di_nucleotide)
            {
-             if (($di_nucleotide{$di_nuc}*2/$len) >= $low_complexity_cutoff_ratio)
+             if (($di_nucleotide{$di_nuc}*2/$len) > $low_complexity_cutoff_ratio)
              {
-              $drop=1;
+              $low_complexity_flag=1;
               delete $di_nucleotide{$di_nuc};
               last; #end for loop
              }
              delete $di_nucleotide{$di_nuc};
            }
          }
-     }
+         if ($low_complexity_flag)
+         {
+             $seq{filter}->{lowComplexity}->{readsNum}++;
+             $seq{filter}->{lowComplexity}->{basesNum}+=$len;
+             $drop=1;
+         }
+  #   }
+     $drop=0 if ($qc_only);
      if ($drop == 1)  #substract the position matrix by one because the dropped read
-     {
+     { 
          for my $pos($start_pos..$end_pos)
          {
             my $q_digit=ord(substr($q,$pos-$start_pos,1))-$ascii;
@@ -1279,7 +1647,7 @@ sub get_base_and_quality_info
             my $base=uc(substr($s,$pos-$start_pos,1));
             $seq{base}->{$pos}->{$base}--;
          }
-         return (\%seq,$drop);
+         return (\%seq,$drop,$new_s);
      }
      else
      {
@@ -1298,9 +1666,15 @@ sub get_base_and_quality_info
          $seq{Base_content}->{N}->{$n_Base_percent}++;
          $seq{Base_content}->{GC}->{$c_Base_percent+$g_Base_percent}++;
  
-         return (\%seq,$drop);
+         return (\%seq,$drop,$new_s);
      }
 } 
+
+sub rand_base
+{
+    my %hash = ( 0 => "A", 1 => "T", 2 => "C", 3 => "G");
+    return $hash{int(rand(4))};
+}
 
 sub standard_deviation {
   my(@numbers) = @_;
@@ -1415,6 +1789,7 @@ sub checkQualityFormat {
       if($_ =~ /^\+/){
     
        $l = <FQ>; # get the quality line
+       chomp $l;
        @line = split(//,$l); # divide in chars
        for(my $i = 0; $i <= $#line; $i++){ # for each char
         $number = ord($line[$i]); # get the number represented by the ascii char
@@ -1463,6 +1838,7 @@ sub split_fastq {
    }
    while (<IN>)
    {
+          last if (eof);
           $name = $_;
           $seq=<IN>;
           $seq =~ s/\n//g;
@@ -1506,61 +1882,115 @@ sub split_fastq {
    if ( $average_len < $opt_min_L) { print "The input average length $average_len < minimum cutoff length(opt_min_L) $opt_min_L\n."; exit;}
    close (IN)  or die( "Cannot close file : $!");
    close (OUTFILE) or die( "Cannot close file : $!") if (! eof OUTFILE);
-   return ($seq_num,@subfiles);
+   return ($seq_num,$total_seq_length,@subfiles);
 }
    
 sub filter_adapter
 {
     my ($s,$mismatchRate)=@_;
-    my $match_flag=0;
+    my @match;
     $mismatchRate = $mismatchRate*100;
-    my @adapterSeqs=(
-		"GATCGGAAGAGCTCGTATGCCGTCTTCTGCTTG",
-		"ACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"CAAGCAGAAGACGGCATACGAGCTCTTCCGATCT",
-		"ACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"GATCGGAAGAGCGGTTCAGCAGGAATGCCGAG",
-		"ACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"AATGATACGGCGACCACCGAGATCTACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"CAAGCAGAAGACGGCATACGAGATCGGTCTCGGCATTCCTGCTGAACCGCTCTTCCGATCT",
-		"ACACTCTTTCCCTACACGACGCTCTTCCGATCT",
-		"CGGTCTCGGCATTCCTGCTGAACCGCTCTTCCGATCT",
-		"CTGTCTCTTATACACATCTAGATGTGTATAAGAGACAG",
-		"CTGTCTCTTATACACATCT",
-		"AGATGTGTATAAGAGACAG",
-		"GATCGGAAGAGCACACGTCTGAACTCCAGTCAC",
-		"GATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT"
+    my $adapter;
+    my $s_len=length($s);
+    my $pos5=0;
+    my $pos3=$s_len+1;
+    my %adapterSeqs=(
+              "cre-loxp-forward" => "TCGTATAACTTCGTATAATGTATGCTATACGAAGTTATTACG",
+              "cre-loxp-reverse" => "AGCATATTGAAGCATATTACATACGATATGCTTCAATAATGC",
+              "TruSeq-adapter-1" => "GGGGTAGTGTGGATCCTCCTCTAGGCAGTTGGGTTATTCTAGAAGCAGATGTGTTGGCTGTTTCTGAAACTCTGGAAAA",
+              "TruSeq-adapter-3" => "CAACAGCCGGTCAAAACATCTGGAGGGTAAGCCATAAACACCTCAACAGAAAA",
+              "PCR-primer-1"     => "CGATAACTTCGTATAATGTATGCTATACGAAGTTATTACG",
+              "PCR-primer-2"     => "GCATAACTTCGTATAGCATACATTATACGAAGTTATACGA",
+              "Nextera-primer-adapter-1" => "GATCGGAAGAGCACACGTCTGAACTCCAGTCAC",
+              "Nextera-primer-adapter-2" => "GATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT",
+              "Nextera-junction-adapter-1" => "CTGTCTCTTATACACATCTAGATGTGTATAAGAGACAG"
+              #"Nextera-junction-adapter-2" => "CTGTCTCTTATACACATCT",
+              #"Nextera-junction-adapter-3" => "AGATGTGTATAAGAGACAG"
 	);
     
-    @adapterSeqs=(@adapterSeqs,&read_artifactFile) if ($artifactFile);
-
-    foreach my $adapter (@adapterSeqs)
+    foreach my $key (keys %adapterSeqs)
     {
-        $match_flag = String::Approx::amatch($adapter, ["i", "S ${mismatchRate}%"], $s);
-        if ($match_flag)
+        $adapter = $adapterSeqs{$key};
+        @match = String::Approx::aslice($adapter, ["i", "S ${mismatchRate}% I 0 D 0"], $s);
+        if (defined $match[0][0])
         {
-           return 1;
+            my $index=$match[0][0];
+            my $match_len=$match[0][1];
+            if ( int($s_len/2)-$index < ($match_len/2) )  # longer left
+            {
+                 substr($s,$index,$s_len-$index,"");
+                 $pos3=length($s)+1;
+            }
+            else  #longer right
+            {
+                 substr($s,0,$index+$match_len,"");
+                 $pos5=$index+$match_len;
+            }
+            return (1,$s,$pos5,$pos3,$key);
         }
     }
-    return 0;
+    if ($artifactFile)
+    {
+        my $other_adapterSeqs=(&read_artifactFile($artifactFile));
+        foreach my $key (keys %{$other_adapterSeqs})
+        {
+            $adapter = $other_adapterSeqs->{$key};
+            @match = String::Approx::aslice($adapter, ["i", "S ${mismatchRate}% I 0 D 0"], $s);
+            if (defined $match[0][0])
+            {
+                my $index=$match[0][0];
+                my $match_len=$match[0][1];
+                if ( int($s_len/2)-$index < ($match_len/2) )  # longer left
+                {
+                    substr($s,$index,$s_len-$index,"");
+                    $pos3=length($s)+1;
+                }
+                else  #longer right
+                {
+                    substr($s,0,$index+$match_len,"");
+                    $pos5=$index+$match_len;
+                }
+                return (1,$s,$pos5,$pos3,$key);
+            }
+        }
+    }
+    return (0,$s,$pos5,$pos3,"");
+}
+
+sub filter_phiX
+{
+    my ($s,$mismatchRate)=@_;
+    my $match_flag=0;
+    $mismatchRate = $mismatchRate*100;
+    $match_flag = String::Approx::amatch($s, ["i", "S ${mismatchRate}%"], $phiX_seq);
+    if ($match_flag)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 sub read_artifactFile 
 {
-     open (ARTIFACT,$artifactFile);
+     my $file =shift;
+     open (ARTIFACT,$file);
+     my $id;
      my $seq;
-     my @seqs;
+     my %hash;
      while(<ARTIFACT>)
      {
         chomp;
-        if (/^>/)
+        if (/^>(\S+)/)
         {
            if ($seq)
            { 
-               push @seqs,$seq;
+               $hash{$id}=$seq; 
            }
            $seq="";
+           $id=$1;
         }
         else
         {
@@ -1569,10 +1999,107 @@ sub read_artifactFile
      }
      if ($seq)
      { 
-        push @seqs,$seq;
+        $hash{$id}=$seq; 
      }
      close ARTIFACT;
-     return @seqs;
+     return \%hash;
+}
+
+sub read_phiX174
+{
+  my $id= "PhiX174_NC_001422";
+  my $seq="GAGTTTTATCGCTTCCATGACGCAGAAGTTAACACTTTCGGATATTTCTGATGAGTCGAA
+AAATTATCTTGATAAAGCAGGAATTACTACTGCTTGTTTACGAATTAAATCGAAGTGGAC
+TGCTGGCGGAAAATGAGAAAATTCGACCTATCCTTGCGCAGCTCGAGAAGCTCTTACTTT
+GCGACCTTTCGCCATCAACTAACGATTCTGTCAAAAACTGACGCGTTGGATGAGGAGAAG
+TGGCTTAATATGCTTGGCACGTTCGTCAAGGACTGGTTTAGATATGAGTCACATTTTGTT
+CATGGTAGAGATTCTCTTGTTGACATTTTAAAAGAGCGTGGATTACTATCTGAGTCCGAT
+GCTGTTCAACCACTAATAGGTAAGAAATCATGAGTCAAGTTACTGAACAATCCGTACGTT
+TCCAGACCGCTTTGGCCTCTATTAAGCTCATTCAGGCTTCTGCCGTTTTGGATTTAACCG
+AAGATGATTTCGATTTTCTGACGAGTAACAAAGTTTGGATTGCTACTGACCGCTCTCGTG
+CTCGTCGCTGCGTTGAGGCTTGCGTTTATGGTACGCTGGACTTTGTGGGATACCCTCGCT
+TTCCTGCTCCTGTTGAGTTTATTGCTGCCGTCATTGCTTATTATGTTCATCCCGTCAACA
+TTCAAACGGCCTGTCTCATCATGGAAGGCGCTGAATTTACGGAAAACATTATTAATGGCG
+TCGAGCGTCCGGTTAAAGCCGCTGAATTGTTCGCGTTTACCTTGCGTGTACGCGCAGGAA
+ACACTGACGTTCTTACTGACGCAGAAGAAAACGTGCGTCAAAAATTACGTGCGGAAGGAG
+TGATGTAATGTCTAAAGGTAAAAAACGTTCTGGCGCTCGCCCTGGTCGTCCGCAGCCGTT
+GCGAGGTACTAAAGGCAAGCGTAAAGGCGCTCGTCTTTGGTATGTAGGTGGTCAACAATT
+TTAATTGCAGGGGCTTCGGCCCCTTACTTGAGGATAAATTATGTCTAATATTCAAACTGG
+CGCCGAGCGTATGCCGCATGACCTTTCCCATCTTGGCTTCCTTGCTGGTCAGATTGGTCG
+TCTTATTACCATTTCAACTACTCCGGTTATCGCTGGCGACTCCTTCGAGATGGACGCCGT
+TGGCGCTCTCCGTCTTTCTCCATTGCGTCGTGGCCTTGCTATTGACTCTACTGTAGACAT
+TTTTACTTTTTATGTCCCTCATCGTCACGTTTATGGTGAACAGTGGATTAAGTTCATGAA
+GGATGGTGTTAATGCCACTCCTCTCCCGACTGTTAACACTACTGGTTATATTGACCATGC
+CGCTTTTCTTGGCACGATTAACCCTGATACCAATAAAATCCCTAAGCATTTGTTTCAGGG
+TTATTTGAATATCTATAACAACTATTTTAAAGCGCCGTGGATGCCTGACCGTACCGAGGC
+TAACCCTAATGAGCTTAATCAAGATGATGCTCGTTATGGTTTCCGTTGCTGCCATCTCAA
+AAACATTTGGACTGCTCCGCTTCCTCCTGAGACTGAGCTTTCTCGCCAAATGACGACTTC
+TACCACATCTATTGACATTATGGGTCTGCAAGCTGCTTATGCTAATTTGCATACTGACCA
+AGAACGTGATTACTTCATGCAGCGTTACCATGATGTTATTTCTTCATTTGGAGGTAAAAC
+CTCTTATGACGCTGACAACCGTCCTTTACTTGTCATGCGCTCTAATCTCTGGGCATCTGG
+CTATGATGTTGATGGAACTGACCAAACGTCGTTAGGCCAGTTTTCTGGTCGTGTTCAACA
+GACCTATAAACATTCTGTGCCGCGTTTCTTTGTTCCTGAGCATGGCACTATGTTTACTCT
+TGCGCTTGTTCGTTTTCCGCCTACTGCGACTAAAGAGATTCAGTACCTTAACGCTAAAGG
+TGCTTTGACTTATACCGATATTGCTGGCGACCCTGTTTTGTATGGCAACTTGCCGCCGCG
+TGAAATTTCTATGAAGGATGTTTTCCGTTCTGGTGATTCGTCTAAGAAGTTTAAGATTGC
+TGAGGGTCAGTGGTATCGTTATGCGCCTTCGTATGTTTCTCCTGCTTATCACCTTCTTGA
+AGGCTTCCCATTCATTCAGGAACCGCCTTCTGGTGATTTGCAAGAACGCGTACTTATTCG
+CCACCATGATTATGACCAGTGTTTCCAGTCCGTTCAGTTGTTGCAGTGGAATAGTCAGGT
+TAAATTTAATGTGACCGTTTATCGCAATCTGCCGACCACTCGCGATTCAATCATGACTTC
+GTGATAAAAGATTGAGTGTGAGGTTATAACGCCGAAGCGGTAAAAATTTTAATTTTTGCC
+GCTGAGGGGTTGACCAAGCGAAGCGCGGTAGGTTTTCTGCTTAGGAGTTTAATCATGTTT
+CAGACTTTTATTTCTCGCCATAATTCAAACTTTTTTTCTGATAAGCTGGTTCTCACTTCT
+GTTACTCCAGCTTCTTCGGCACCTGTTTTACAGACACCTAAAGCTACATCGTCAACGTTA
+TATTTTGATAGTTTGACGGTTAATGCTGGTAATGGTGGTTTTCTTCATTGCATTCAGATG
+GATACATCTGTCAACGCCGCTAATCAGGTTGTTTCTGTTGGTGCTGATATTGCTTTTGAT
+GCCGACCCTAAATTTTTTGCCTGTTTGGTTCGCTTTGAGTCTTCTTCGGTTCCGACTACC
+CTCCCGACTGCCTATGATGTTTATCCTTTGAATGGTCGCCATGATGGTGGTTATTATACC
+GTCAAGGACTGTGTGACTATTGACGTCCTTCCCCGTACGCCGGGCAATAACGTTTATGTT
+GGTTTCATGGTTTGGTCTAACTTTACCGCTACTAAATGCCGCGGATTGGTTTCGCTGAAT
+CAGGTTATTAAAGAGATTATTTGTCTCCAGCCACTTAAGTGAGGTGATTTATGTTTGGTG
+CTATTGCTGGCGGTATTGCTTCTGCTCTTGCTGGTGGCGCCATGTCTAAATTGTTTGGAG
+GCGGTCAAAAAGCCGCCTCCGGTGGCATTCAAGGTGATGTGCTTGCTACCGATAACAATA
+CTGTAGGCATGGGTGATGCTGGTATTAAATCTGCCATTCAAGGCTCTAATGTTCCTAACC
+CTGATGAGGCCGCCCCTAGTTTTGTTTCTGGTGCTATGGCTAAAGCTGGTAAAGGACTTC
+TTGAAGGTACGTTGCAGGCTGGCACTTCTGCCGTTTCTGATAAGTTGCTTGATTTGGTTG
+GACTTGGTGGCAAGTCTGCCGCTGATAAAGGAAAGGATACTCGTGATTATCTTGCTGCTG
+CATTTCCTGAGCTTAATGCTTGGGAGCGTGCTGGTGCTGATGCTTCCTCTGCTGGTATGG
+TTGACGCCGGATTTGAGAATCAAAAAGAGCTTACTAAAATGCAACTGGACAATCAGAAAG
+AGATTGCCGAGATGCAAAATGAGACTCAAAAAGAGATTGCTGGCATTCAGTCGGCGACTT
+CACGCCAGAATACGAAAGACCAGGTATATGCACAAAATGAGATGCTTGCTTATCAACAGA
+AGGAGTCTACTGCTCGCGTTGCGTCTATTATGGAAAACACCAATCTTTCCAAGCAACAGC
+AGGTTTCCGAGATTATGCGCCAAATGCTTACTCAAGCTCAAACGGCTGGTCAGTATTTTA
+CCAATGACCAAATCAAAGAAATGACTCGCAAGGTTAGTGCTGAGGTTGACTTAGTTCATC
+AGCAAACGCAGAATCAGCGGTATGGCTCTTCTCATATTGGCGCTACTGCAAAGGATATTT
+CTAATGTCGTCACTGATGCTGCTTCTGGTGTGGTTGATATTTTTCATGGTATTGATAAAG
+CTGTTGCCGATACTTGGAACAATTTCTGGAAAGACGGTAAAGCTGATGGTATTGGCTCTA
+ATTTGTCTAGGAAATAACCGTCAGGATTGACACCCTCCCAATTGTATGTTTTCATGCCTC
+CAAATCTTGGAGGCTTTTTTATGGTTCGTTCTTATTACCCTTCTGAATGTCACGCTGATT
+ATTTTGACTTTGAGCGTATCGAGGCTCTTAAACCTGCTATTGAGGCTTGTGGCATTTCTA
+CTCTTTCTCAATCCCCAATGCTTGGCTTCCATAAGCAGATGGATAACCGCATCAAGCTCT
+TGGAAGAGATTCTGTCTTTTCGTATGCAGGGCGTTGAGTTCGATAATGGTGATATGTATG
+TTGACGGCCATAAGGCTGCTTCTGACGTTCGTGATGAGTTTGTATCTGTTACTGAGAAGT
+TAATGGATGAATTGGCACAATGCTACAATGTGCTCCCCCAACTTGATATTAATAACACTA
+TAGACCACCGCCCCGAAGGGGACGAAAAATGGTTTTTAGAGAACGAGAAGACGGTTACGC
+AGTTTTGCCGCAAGCTGGCTGCTGAACGCCCTCTTAAGGATATTCGCGATGAGTATAATT
+ACCCCAAAAAGAAAGGTATTAAGGATGAGTGTTCAAGATTGCTGGAGGCCTCCACTATGA
+AATCGCGTAGAGGCTTTGCTATTCAGCGTTTGATGAATGCAATGCGACAGGCTCATGCTG
+ATGGTTGGTTTATCGTTTTTGACACTCTCACGTTGGCTGACGACCGATTAGAGGCGTTTT
+ATGATAATCCCAATGCTTTGCGTGACTATTTTCGTGATATTGGTCGTATGGTTCTTGCTG
+CCGAGGGTCGCAAGGCTAATGATTCACACGCCGACTGCTATCAGTATTTTTGTGTGCCTG
+AGTATGGTACAGCTAATGGCCGTCTTCATTTCCATGCGGTGCACTTTATGCGGACACTTC
+CTACAGGTAGCGTTGACCCTAATTTTGGTCGTCGGGTACGCAATCGCCGCCAGTTAAATA
+GCTTGCAAAATACGTGGCCTTATGGTTACAGTATGCCCATCGCAGTTCGCTACACGCAGG
+ACGCTTTTTCACGTTCTGGTTGGTTGTGGCCTGTTGATGCTAAAGGTGAGCCGCTTAAAG
+CTACCAGTTATATGGCTGTTGGTTTCTATGTGGCTAAATACGTTAACAAAAAGTCAGATA
+TGGACCTTGCTGCTAAAGGTCTAGGAGCTAAAGAATGGAACAACTCACTAAAAACCAAGC
+TGTCGCTACTTCCCAAGAAGCTGTTCAGAATCAGAATGAGCCGCAACTTCGGGATGAAAA
+TGCTCACAATGACAAATCTGTCCACGGAGTGCTTAATCCAACTTACCAAGCTGGGTTACG
+ACGCGACGCCGTTCAACCAGATATTGAAGCAGAACGCAAAAAGAGAGATGAGATTGAGGC
+TGGGAAAAGTTACTGTAGCCGACGTTTTGGCGGCGCAACCTGTGACGACAAATCTGCTCA
+AATTTATGCGCGCTTCGATAAAAATGATTGGCGTATCCAACCTGCA";
+   $seq=~ s/\n//g;
+   return ($id,$seq);
 }
 
 1;

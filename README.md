@@ -30,6 +30,12 @@ BASIC USAGE
 ---------------
 VERSION HISTORY
 ---------------
+======== Version 1.3
+- add -phiX to filter phiX reads
+- add -substitute to replace "N" in the trimmed reads with random base A,T,C ,or G
+- change -adapter behavior from filtering to trimming
+- change -n behavior from # of tolerance to number of continuous base "N" filtering
+
 ======== Version 1.2
 - add -adapter and -artifactFile for filtering reads with Adapters/Primers and other contaminations
 - require String::Approx module from CPAN for above function

@@ -26,24 +26,24 @@ $ cpan> install String::Approx
 
 3) -------
 
-Copy the Galaxy module xml file (IFQC.xml) and the QC tool (illumina_fastq_QC.pl) into 
-$ ${galaxy_dir}/tools/IFQC/
+Copy the Galaxy module xml file (FaQCs.xml) and the QC tool (FaQCs.pl) into 
+$ ${galaxy_dir}/tools/FaQCs/
  
 
 4) -------
 
 Add the following three lines 
-<section name="IlluminaFastqQC" id="IFQC">
-    <tool file="IFQC/IFQC.xml"/>
+<section name="FastqQCs" id="FaQCs">
+    <tool file="FaQCs/FaQCs.xml"/>
 </section>
 
 into
 $ ${galaxy_dir}/tool_conf.xml 
 
-for adding the Galaxy left panel entry for IlluminaFastqQC section. 
+for adding the Galaxy left panel entry for FastqQCs section. 
 
 Or you can only add the following line to an existing section.
- <tool file="IFQC/IFQC.xml"/>
+ <tool file="FaQCs/FaQCs.xml"/>
 
 5) -------
 
@@ -54,7 +54,7 @@ Edit universe_wsgi.ini based on the instruction from
 http://wiki.galaxyproject.org/Admin/Config/Performance/Cluster#Cluster_Resources_Managers
 
 Edit line 44 of the file
-$ ${galaxy_dir}/tools/IFQC/IFQC.xml
+$ ${galaxy_dir}/tools/FaQCs/FaQCs.xml
 
 indicating for -t the number of process which should be consistent with the Job runner
 

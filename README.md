@@ -1,6 +1,6 @@
 FaQCs: Quality Control of Next Generateion Sequenceing Data
-=======
-
+===========================================================
+![3D QC plot](http://oi61.tinypic.com/n36p9x.jpg)
 -------------
 PREREQUISITES
 -------------
